@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI名字评分器 - 带真实训练进度</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
+  <style>
+    body {
+      font-family: "Microsoft YaHei", sans-serif;
+      text-align: center;
+      background: #f0f4ff;
+      padding: 40px;
+    }
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      background: white;
+      padding: 30px;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+    }
+    h1 { color: #3a6dff; }
+    #status {
+      margin: 20px 0;
+      font-weight: bold;
+      color: #d32f2f;
+    }
+    .progress-container {
+      width: 80%;
+      margin: 20px auto;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #f9f9f9;
+    }
+    .progress-bar {
+      height: 20px;
+      width: 0%;
+      background: linear-gradient(90deg, #4facfe, #00f2fe);
+      transition: width 0.1s ease;
+      text-align: center;
+      line-height: 20px;
+      color: white;
+      font-size: 12px;
+      font-weight: bold;
+    }
+    input {
+      padding: 10px;
+      width: 200px;
+      margin: 10px;
+      border: 2px solid #ccc;
+      border-radius: 6px;
+    }
+    input:focus {
+      outline: none;
+      border-color: #3a6dff;
+    }
+    button {
+      padding: 10px 20px;
+      background: #3a6dff;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    button:hover {
+      background: #2a5bcc;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    #result {
+      margin-top: 20px;
+      font-size: 20px;
+      font-weight: bold;
+      color: #c62828;
+    }
+    .loader {
+      border: 4px solid #f3f3f3;
+      border-top: 4px solid #3a6dff;
+      border-radius: 50%;
+      width: 24px;
+      height: 24px;
+      animation: spin 1s linear infinite;
+      margin: 10px auto;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🧠 AI名字评分器</h1>
+    <p>基于真实神经网络训练（浏览器本地完成）</p>
+
+    <div id="training">
+      <p id="status">🔧 准备数据...</p>
+      <div class="progress-container">
+        <div class="progress-bar" id="progressBar">0%</div>
+      </div>
+      <div class="loader"></div>
+      <p id="lossText">Loss: -</p>
+    </div>
+
+    <div id="app" style="display:none;">
+      <input type="text" id="nameInput" placeholder="请输入名字" />
+      <button onclick="predict()">评分</button>
+      <div id="result"></div>
+    </div>
+  </div>
+
+  <script>
+    // === 1. 数据集：好名字 vs 坏名字 ===
+    const goodNames = ["子轩", "欣怡", "浩宇", "思琪", "俊杰", "雅婷", "天佑", "美琳", "博文", "梓涵", "若曦", "宇辰", "晨曦", "浩然"];
+    const badNames = ["狗剩", "铁柱", "二愣", "赵日天", "张伟", "李强", "王霸天", "刘建国", "陈红", "周杰", "狗蛋", "翠花", "建国", "伟"];
+
+    const allNames = [...goodNames, ...badNames];
+    const labels = [
+      ...goodNames.map(() => 1.0),   // 好名字 → 接近 100 分
+      ...badNames.map(() => 0.1)     // 坏名字 → 接近 10 分
+    ];
+
+    // 构建字符表
+    const charSet = new Set(allNames.join(""));
+    const charList = ['<PAD>', ...charSet];
+    const charToIndex = {};
+    charList.forEach((ch, idx) => charToIndex[ch] = idx);
+
+    const VOCAB_SIZE = charList.length;
+    const NAME_LENGTH = 4;
+
+    // 编码名字
+    function encodeName(name) {
+      const padded = name.slice(0, NAME_LENGTH).padEnd(NAME_LENGTH, '<PAD>');
+      return Array.from(padded).map(ch => charToIndex[ch] || 0);
+    }
+
+    // === 2. 创建模型 ===
+    function createModel() {
+      const model = tf.sequential();
+
+      model.add(tf.layers.embedding({
+        inputDim: VOCAB_SIZE,
+        outputDim: 8,
+        inputLength: NAME_LENGTH
+      }));
+
+      model.add(tf.layers.globalAveragePooling1D());
+
+      model.add(tf.layers.dense({ units: 16, activation: 'relu' }));
+      model.add(tf.layers.dense({ units: 1, activation: 'sigmoid' }));
+
+      model.compile({
+        optimizer: tf.train.adam(0.01),
+        loss: 'meanSquaredError',
+        metrics: ['mse']
+      });
+
+      return model;
+    }
+
+    // === 3. 训练模型 + 实时更新进度条 ===
+    async function trainModel() {
+      const model = createModel();
+
+      // 编码输入
+      const xsData = allNames.map(encodeName);
+      const xs = tf.tensor2d(xsData);
+      const ys = tf.tensor2d(labels, [labels.length, 1]);
+
+      const EPOCHS = 150;
+      const batchSize = 8;
+
+      document.getElementById("status").textContent = `🚀 训练中：0 / ${EPOCHS} epochs`;
+      document.getElementById("lossText").textContent = "Loss: 正在计算...";
+
+      let modelTrained;
+
+      await model.fit(xs, ys, {
+        epochs: EPOCHS,
+        batchSize: batchSize,
+        shuffle: true,
+        callbacks: {
+          onEpochBegin: (epoch) => {
+            // 实时更新进度条
+            const progress = Math.round((epoch / EPOCHS) * 100);
+            document.getElementById("progressBar").style.width = `${progress}%`;
+            document.getElementById("progressBar").textContent = `${progress}%`;
+            document.getElementById("status").textContent = `🚀 训练中：${epoch} / ${EPOCHS} epochs`;
+          },
+          onEpochEnd: (epoch, logs) => {
+            // 更新 Loss
+            document.getElementById("lossText").textContent = `Loss: ${logs.loss.toFixed(4)}`;
+            
+            // 最后一轮结束
+            if (epoch === EPOCHS - 1) {
+              document.getElementById("progressBar").style.width = "100%";
+              document.getElementById("progressBar").textContent = "100%";
+              document.getElementById("status").textContent = "✅ 训练完成！AI 已学会评分！";
+              document.getElementById("lossText").textContent = `Final Loss: ${logs.loss.toFixed(4)}`;
+              
+              setTimeout(() => {
+                document.getElementById("training").style.display = "none";
+                document.getElementById("app").style.display = "block";
+              }, 800);
+            }
+          }
+        }
+      });
+
+      xs.dispose();
+      ys.dispose();
+      return model;
+    }
+
+    // === 4. 预测评分 ===
+    let model = null;
+
+    async function predict() {
+      const name = document.getElementById("nameInput").value.trim();
+      const resultDiv = document.getElementById("result");
+
+      if (!name) {
+        resultDiv.textContent = "⚠️ 请输入名字！";
+        return;
+      }
+
+      const encoded = encodeName(name);
+      const input = tf.tensor2d([encoded]);
+      const pred = model.predict(input).dataSync()[0];
+      const score = Math.round(pred * 100); // 0~1 → 0~100
+
+      let comment = "";
+      if (score >= 90) comment = "🌟 天生主角名，万人迷！";
+      else if (score >= 80) comment = "👍 吉祥顺口，人见人爱！";
+      else if (score >= 70) comment = "😊 不错的名字，有气质。";
+      else if (score >= 60) comment = "😐 还行，能接受。";
+      else if (score >= 40) comment = "😅 有点土味，建议改昵称。";
+      else comment = "💀 这名字可能会被起外号…";
+
+      resultDiv.innerHTML = `
+        <p><strong>【${name}】</strong> 得分：<span style="color:${
+          score >= 80 ? '#1b5
